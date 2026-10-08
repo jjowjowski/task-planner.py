@@ -2,15 +2,20 @@ import os, json, time, requests
 from datetime import datetime, timedelta, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from flask import Flask, request
 import pytz
+import threading
 
 KEY = os.getenv("ANTHROPIC_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_ID = os.getenv("TELEGRAM_CHAT_ID")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT")
+RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL", "http://localhost:5000")
 
 TASKS_FILE = "tasks.json"
 PENDING_SCHEDULE_FILE = "pending_schedule.json"
+
+app = Flask(__name__)
 
 def get_calendar_service():
     try:
@@ -145,24 +150,30 @@ def create_calendar_events(schedule_text):
                 continue
             
             try:
-                time_part, task_part = line.split(':', 1)
-                time_part = time_part.strip()
-                task_part = task_part.strip()
-                
-                if ' - ' in task_part:
-                    start_time_str, end_time_str = task_part.split(' - ', 1)
-                    task_name = task_part.split(' - ', 1)[1].strip() if len(task_part.split(' - ', 1)) > 1 else task_part
-                else:
+                parts = line.split(':')
+                if len(parts) < 2:
                     continue
                 
-                start_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {time_part}", "%Y-%m-%d %I:%M %p")
-                end_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {end_time_str}", "%Y-%m-%d %I:%M %p")
+                time_and_task = ':'.join(parts[1:]).strip()
+                
+                if ' - ' not in time_and_task:
+                    continue
+                
+                time_range, task_name = time_and_task.split(' - ', 1)
+                start_time_str = time_range.strip()
+                end_time_str = parts[0].split('-')[-1].strip() if '-' in parts[0] else ""
+                
+                try:
+                    start_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {start_time_str}", "%Y-%m-%d %I:%M %p")
+                    end_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {time_and_task.split(':')[-1]}", "%Y-%m-%d %I:%M %p")
+                except:
+                    continue
                 
                 start_time = nz_tz.localize(start_time)
                 end_time = nz_tz.localize(end_time)
                 
                 event = {
-                    'summary': task_name,
+                    'summary': task_name.strip(),
                     'start': {'dateTime': start_time.isoformat()},
                     'end': {'dateTime': end_time.isoformat()}
                 }
@@ -194,92 +205,76 @@ def is_7pm_nzdt():
     nz_now = datetime.now(nz_tz)
     return nz_now.hour == 19 and nz_now.minute < 1
 
-def check_telegram_updates():
+@app.route('/webhook', methods=['POST'])
+def webhook():
     try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("ok") and data.get("result"):
-                latest = data["result"][-1]
-                if "message" in latest:
-                    return latest["message"]["text"].lower()
-        return None
-    except Exception as e:
-        print(f"Error checking Telegram: {e}")
-        return None
-
-print("Task Planner started")
-
-last_7pm_check = None
-
-while True:
-    try:
-        nz_tz = pytz.timezone('Pacific/Auckland')
-        nz_now = datetime.now(nz_tz)
-        
-        if is_7pm_nzdt() and (last_7pm_check is None or (nz_now - last_7pm_check).seconds > 3600):
-            print("7 PM - Asking for tasks")
-            send_telegram("📋 What tasks do you need to do tomorrow? (Send as comma-separated list)")
-            last_7pm_check = nz_now
-            time.sleep(60)
-        
-        pending = load_pending_schedule()
-        
-        if pending is None:
-            user_input = check_telegram_updates()
-            if user_input and len(user_input) > 3:
-                if user_input in ["yes", "confirm", "ok", "schedule it"]:
-                    print("User confirmed schedule")
-                else:
-                    tasks = [task.strip() for task in user_input.split(',')]
-                    tasks = [t for t in tasks if t]
+        data = request.json
+        if 'message' in data:
+            message = data['message']
+            text = message.get('text', '').lower()
+            
+            pending = load_pending_schedule()
+            
+            if pending is None:
+                tasks = [task.strip() for task in text.split(',')]
+                tasks = [t for t in tasks if t and len(t) > 2]
+                
+                if tasks:
+                    print(f"Generating schedule for: {tasks}")
+                    schedule = generate_schedule(tasks)
                     
-                    if tasks:
-                        print(f"Generating schedule for: {tasks}")
-                        schedule = generate_schedule(tasks)
-                        
-                        msg = f"""📅 Proposed Schedule for Tomorrow:
+                    msg = f"""📅 Proposed Schedule for Tomorrow:
 
 {schedule}
 
-Does this work? Reply: Yes/Confirm/OK to create events, or send new tasks."""
-                        
-                        send_telegram(msg)
-                        save_pending_schedule({"schedule": schedule, "tasks": tasks})
-                        time.sleep(60)
-        else:
-            user_input = check_telegram_updates()
-            if user_input and user_input in ["yes", "confirm", "ok"]:
-                print("Creating calendar events")
-                create_calendar_events(pending["schedule"])
-                
-                tasks_obj = load_tasks()
-                tasks_obj["tasks"] = pending["tasks"]
-                tasks_obj["last_updated"] = datetime.now().isoformat()
-                save_tasks(tasks_obj)
-                
-                send_telegram("✅ Calendar events created! Your tasks are saved. Send 'Done: task name' to mark tasks complete.")
-                delete_pending_schedule()
-                time.sleep(60)
-            elif user_input and "done:" in user_input:
-                task_to_remove = user_input.replace("done:", "").strip()
-                tasks_obj = load_tasks()
-                original_count = len(tasks_obj["tasks"])
-                tasks_obj["tasks"] = [t for t in tasks_obj["tasks"] if task_to_remove.lower() not in t.lower()]
-                
-                if len(tasks_obj["tasks"]) < original_count:
+Reply: YES to confirm and create events"""
+                    
+                    send_telegram(msg)
+                    save_pending_schedule({"schedule": schedule, "tasks": tasks})
+            else:
+                if text in ["yes", "confirm", "ok"]:
+                    print("Creating calendar events")
+                    create_calendar_events(pending["schedule"])
+                    
+                    tasks_obj = load_tasks()
+                    tasks_obj["tasks"] = pending["tasks"]
+                    tasks_obj["last_updated"] = datetime.now().isoformat()
                     save_tasks(tasks_obj)
-                    send_telegram(f"✅ Marked done: {task_to_remove}")
-                else:
-                    send_telegram(f"❌ Task not found: {task_to_remove}")
-                time.sleep(30)
+                    
+                    send_telegram("✅ Calendar events created!")
+                    delete_pending_schedule()
+                elif "done:" in text:
+                    task_to_remove = text.replace("done:", "").strip()
+                    tasks_obj = load_tasks()
+                    original_count = len(tasks_obj["tasks"])
+                    tasks_obj["tasks"] = [t for t in tasks_obj["tasks"] if task_to_remove not in t.lower()]
+                    
+                    if len(tasks_obj["tasks"]) < original_count:
+                        save_tasks(tasks_obj)
+                        send_telegram(f"✅ Marked done: {task_to_remove}")
+                    else:
+                        send_telegram(f"❌ Task not found: {task_to_remove}")
         
-        time.sleep(30)
-    
-    except KeyboardInterrupt:
-        print("Stopped")
-        break
+        return {"ok": True}
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Webhook error: {e}")
+        return {"ok": False}
+
+def ask_for_tasks():
+    while True:
+        nz_tz = pytz.timezone('Pacific/Auckland')
+        nz_now = datetime.now(nz_tz)
+        
+        if is_7pm_nzdt():
+            print("7 PM - Asking for tasks")
+            send_telegram("📋 What tasks do you need to do tomorrow? (Send as comma-separated list)")
+            time.sleep(3600)
+        
         time.sleep(60)
+
+if __name__ == '__main__':
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/setWebhook", json={"url": f"{RAILWAY_URL}/webhook"})
+    print("Webhook registered")
+    
+    threading.Thread(target=ask_for_tasks, daemon=True).start()
+    app.run(host='0.0.0.0', port=5000)
