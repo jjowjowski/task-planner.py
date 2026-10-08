@@ -4,7 +4,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from flask import Flask, request
 import pytz
-import threading
 
 KEY = os.getenv("ANTHROPIC_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -193,10 +192,17 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Telegram error: {e}")
 
+@app.route('/health', methods=['GET'])
+def health():
+    return {"status": "ok"}
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
+        print("Webhook called!")
         data = request.json
+        print(f"Data: {data}")
+        
         if 'message' in data:
             message = data['message']
             text = message.get('text', '').lower()
@@ -248,17 +254,15 @@ Reply: YES to confirm and create events"""
         return {"ok": True}
     except Exception as e:
         print(f"Webhook error: {e}")
+        import traceback
+        traceback.print_exc()
         return {"ok": False}
 
-def ask_for_tasks():
-    asked = False
-    while True:
-        if not asked:
-            print("Asking for tasks")
-            send_telegram("📋 What tasks do you need to do tomorrow? (Send as comma-separated list)")
-            asked = True
-        
-        time.sleep(60)
+@app.route('/ask', methods=['GET'])
+def ask():
+    print("Ask endpoint called")
+    send_telegram("📋 What tasks do you need to do tomorrow? (Send as comma-separated list)")
+    return {"ok": True}
 
 if __name__ == '__main__':
     webhook_url = f"{RAILWAY_STATIC_URL}/webhook"
@@ -269,5 +273,4 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Webhook registration error: {e}")
     
-    threading.Thread(target=ask_for_tasks, daemon=True).start()
     print("Task planner started")
