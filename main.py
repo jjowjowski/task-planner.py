@@ -193,11 +193,6 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def is_7pm_nzdt():
-    nz_tz = pytz.timezone('Pacific/Auckland')
-    nz_now = datetime.now(nz_tz)
-    return nz_now.hour == 19 and nz_now.minute < 1
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -256,14 +251,12 @@ Reply: YES to confirm and create events"""
         return {"ok": False}
 
 def ask_for_tasks():
+    asked = False
     while True:
-        nz_tz = pytz.timezone('Pacific/Auckland')
-        nz_now = datetime.now(nz_tz)
-        
-        if is_7pm_nzdt():
-            print("7 PM - Asking for tasks")
+        if not asked:
+            print("Asking for tasks")
             send_telegram("📋 What tasks do you need to do tomorrow? (Send as comma-separated list)")
-            time.sleep(3600)
+            asked = True
         
         time.sleep(60)
 
