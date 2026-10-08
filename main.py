@@ -10,7 +10,7 @@ KEY = os.getenv("ANTHROPIC_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_ID = os.getenv("TELEGRAM_CHAT_ID")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT")
-RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL", "http://localhost:5000")
+RAILWAY_STATIC_URL = os.getenv("RAILWAY_STATIC_URL", "http://localhost:8080")
 
 TASKS_FILE = "tasks.json"
 PENDING_SCHEDULE_FILE = "pending_schedule.json"
@@ -105,7 +105,7 @@ Generate a realistic schedule that:
 1. Respects existing calendar events
 2. Groups similar tasks together
 3. Includes breaks
-4. Prioritizes important tasks (ECON, Thesis, applications)
+4. Prioritizes important tasks
 5. Leaves buffer time
 
 Return ONLY a schedule in this format, no other text:
@@ -146,28 +146,21 @@ def create_calendar_events(schedule_text):
         lines = schedule_text.strip().split('\n')
         
         for line in lines:
-            if ':' not in line or '-' not in line:
+            if not line.strip() or ':' not in line:
                 continue
             
             try:
-                parts = line.split(':')
-                if len(parts) < 2:
+                if ' - ' not in line:
                     continue
                 
-                time_and_task = ':'.join(parts[1:]).strip()
+                time_part, task_part = line.split(':', 1)
+                start_end, task_name = task_part.split(' - ', 1)
                 
-                if ' - ' not in time_and_task:
-                    continue
+                start_time_str = time_part.strip()
+                end_time_str = start_end.strip()
                 
-                time_range, task_name = time_and_task.split(' - ', 1)
-                start_time_str = time_range.strip()
-                end_time_str = parts[0].split('-')[-1].strip() if '-' in parts[0] else ""
-                
-                try:
-                    start_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {start_time_str}", "%Y-%m-%d %I:%M %p")
-                    end_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {time_and_task.split(':')[-1]}", "%Y-%m-%d %I:%M %p")
-                except:
-                    continue
+                start_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {start_time_str}", "%Y-%m-%d %I:%M %p")
+                end_time = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {end_time_str}", "%Y-%m-%d %I:%M %p")
                 
                 start_time = nz_tz.localize(start_time)
                 end_time = nz_tz.localize(end_time)
@@ -179,7 +172,7 @@ def create_calendar_events(schedule_text):
                 }
                 
                 service.events().insert(calendarId='primary', body=event).execute()
-                print(f"Created event: {task_name}")
+                print(f"Created event: {task_name.strip()}")
             except Exception as e:
                 print(f"Error parsing line '{line}': {e}")
                 continue
@@ -212,6 +205,8 @@ def webhook():
         if 'message' in data:
             message = data['message']
             text = message.get('text', '').lower()
+            
+            print(f"Received: {text}")
             
             pending = load_pending_schedule()
             
@@ -273,8 +268,13 @@ def ask_for_tasks():
         time.sleep(60)
 
 if __name__ == '__main__':
-    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/setWebhook", json={"url": f"{RAILWAY_URL}/webhook"})
-    print("Webhook registered")
+    webhook_url = f"{RAILWAY_STATIC_URL}/webhook"
+    print(f"Setting webhook to: {webhook_url}")
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/setWebhook", json={"url": webhook_url})
+        print(f"Webhook response: {r.json()}")
+    except Exception as e:
+        print(f"Webhook registration error: {e}")
     
     threading.Thread(target=ask_for_tasks, daemon=True).start()
-    app.run(host='0.0.0.0', port=5000)
+    print("Task planner started")
